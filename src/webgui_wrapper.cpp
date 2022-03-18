@@ -14,8 +14,10 @@
 #include "printout.h"
 #include "renderer.h"
 #include "speedtestutil.h"
+#include "version.h"
 
 std::atomic<bool> start_flag = false;
+std::atomic<time_t> done_time = 0;
 
 //variables from main
 extern std::vector<nodeInfo> allNodes;
@@ -39,11 +41,9 @@ nodeInfo current_node;
 
 nodeInfo find_node(std::string &group, std::string &remarks, std::string &server, int &server_port)
 {
-    for(nodeInfo &x : allNodes)
-    {
-        if(x.group == group && x.remarks == remarks && x.server == server && x.port == server_port)
-            return x;
-    }
+    auto iter = std::find_if(allNodes.begin(), allNodes.end(), [&](auto x){ return x.group == group && x.remarks == remarks && x.server == server && x.port == server_port; });
+    if(iter != allNodes.end())
+        return *iter;
     return nodeInfo();
 }
 
@@ -62,33 +62,20 @@ void ssrspeed_regenerate_node_list(rapidjson::Document &json)
         remarks = GetMember(json["configs"][i]["config"], "remarks");
         server = GetMember(json["configs"][i]["config"], "server");
         server_port = stoi(GetMember(json["configs"][i]["config"], "server_port"));
-        for(nodeInfo &x : allNodes)
-        {
-            if(x.group == group && x.remarks == remarks && x.server == server && x.port == server_port)
-            {
-                targetNodes.push_back(x);
-                break;
-            }
-        }
+        auto iter = std::find_if(allNodes.begin(), allNodes.end(), [&](auto x){ return x.group == group && x.remarks == remarks && x.server == server && x.port == server_port; });
+        if(iter != allNodes.end())
+            targetNodes.push_back(*iter);
     }
     node_count = json["configs"].Size();
     rewriteNodeID(targetNodes);
 }
 
-double ssrspeed_get_speed_number(std::string speed)
+double ssrspeed_get_speed_number(const std::string &speed)
 {
     if(speed == "N/A")
         return 0;
 
-    std::string metric = speed.substr(speed.size() - 2, speed.size());
-    if(metric == "MB")
-        return stof(speed.substr(0, speed.size() - 3)) * 1048576.0;
-    else if(metric == "KB")
-        return stof(speed.substr(0, speed.size() - 3)) * 1024.0;
-    else if(metric == "GB")
-        return stof(speed.substr(0, speed.size() - 3)) * 1073741824.0;
-    else
-        return stof(speed.substr(0, speed.size() - 2));
+    return streamToInt(speed);
 }
 
 void json_write_node(rapidjson::Writer<rapidjson::StringBuffer> &writer, nodeInfo &node)
@@ -165,7 +152,7 @@ std::string ssrspeed_generate_results(std::vector<nodeInfo> &nodes)
 {
     rapidjson::StringBuffer sb;
     rapidjson::Writer<rapidjson::StringBuffer> writer(sb);
-    nodeInfo node;
+    nodeInfo *node = nullptr;
 
     writer.StartObject();
     writer.Key("status");
@@ -176,22 +163,22 @@ std::string ssrspeed_generate_results(std::vector<nodeInfo> &nodes)
     {
         if(x.id == cur_node_id)
         {
-            node = x;
+            node = &x;
         }
         if(x.id == current_node.id)
         {
             current_node = x;
         }
     }
-    if(node.linkType != -1)
-        json_write_node(writer, node);
-    if(current_node.groupID != node.groupID || current_node.id != node.id)
+    if(node && node->linkType != -1)
+        json_write_node(writer, *node);
+    if(node && (current_node.groupID != node->groupID || current_node.id != node->id))
     {
         if(current_node.linkType != -1)
         {
             testedNodes.push_back(current_node);
         }
-        current_node = node;
+        current_node = *node;
     }
     writer.EndObject();
 
@@ -286,19 +273,23 @@ std::string ssrspeed_generate_color()
     return sb.GetString();
 }
 
-void ssrspeed_webserver_routine(std::string listen_address, int listen_port)
+void ssrspeed_webserver_routine(const std::string &listen_address, int listen_port)
 {
     listener_args args = {listen_address, listen_port, 10, 4};
+    extern bool gServeFile;
+    extern std::string gServeFileRoot;
+    gServeFile = true;
+    gServeFileRoot = "webui/";
 
     append_response("GET", "/status", "text/plain", [](RESPONSE_CALLBACK_ARGS) -> std::string
     {
         return start_flag ? "running" : "stopped";
     });
 
-    append_response("GET", "/", "REDIRECT", [](RESPONSE_CALLBACK_ARGS) -> std::string
+    /*append_response("GET", "/", "REDIRECT", [](RESPONSE_CALLBACK_ARGS) -> std::string
     {
-        return "http://web.xn--8str30ceuh.site/";
-    });
+        return "http://web1.ospf.in/";
+    });*/
 
     append_response("GET", "/favicon.ico", "x-icon", [](RESPONSE_CALLBACK_ARGS) -> std::string
     {
@@ -307,7 +298,7 @@ void ssrspeed_webserver_routine(std::string listen_address, int listen_port)
 
     append_response("GET", "/getversion", "text/plain", [](RESPONSE_CALLBACK_ARGS) -> std::string
     {
-        return "{\"main\":\"2.6.3\",\"webapi\":\"0.5.2\"}";
+        return "{\"main\":\"" VERSION "\",\"webapi\":\"0.6.1\"}";
     });
 
     append_response("GET", "/getcolors", "text/plain", [](RESPONSE_CALLBACK_ARGS) -> std::string
@@ -321,7 +312,7 @@ void ssrspeed_webserver_routine(std::string listen_address, int listen_port)
             return "running";
         rapidjson::Document json;
         std::string suburl;
-        json.Parse(postdata.data());
+        json.Parse(request.postdata.data());
         suburl = GetMember(json, "url");
         eraseElements(allNodes);
         addNodes(suburl, false);
@@ -331,12 +322,12 @@ void ssrspeed_webserver_routine(std::string listen_address, int listen_port)
     append_response("POST", "/readfileconfig", "text/plain", [](RESPONSE_CALLBACK_ARGS) -> std::string
     {
         eraseElements(allNodes);
-        fileWrite("received.txt", getFormData(postdata), true);
+        //fileWrite("received.txt", getFormData(postdata), true);
         if(start_flag)
             return "running";
         else
         {
-            if(explodeConfContent(getFormData(postdata), override_conf_port, ss_libev, ssr_libev, allNodes) == SPEEDTEST_ERROR_UNRECOGFILE)
+            if(explodeConfContent(getFormData(request.postdata), override_conf_port, ss_libev, ssr_libev, allNodes) == SPEEDTEST_ERROR_UNRECOGFILE)
                 return "error";
             else
                 return ssrspeed_generate_web_configs(allNodes);
@@ -347,9 +338,12 @@ void ssrspeed_webserver_routine(std::string listen_address, int listen_port)
     {
         if(start_flag)
             return "running";
+        time_t cur_time = time(NULL);
+        if(cur_time - done_time < 5)
+            return "done";
         start_flag = true;
         rapidjson::Document json;
-        json.Parse(postdata.data());
+        json.Parse(request.postdata.data());
         std::string test_mode = GetMember(json, "testMode"), sort_method = GetMember(json, "sortMethod"), group = GetMember(json, "group"), exp_color = GetMember(json, "colors");
 
         if(test_mode == "ALL")
@@ -364,6 +358,7 @@ void ssrspeed_webserver_routine(std::string listen_address, int listen_port)
 
         ssrspeed_regenerate_node_list(json);
         batchTest(targetNodes);
+        done_time = time(NULL);
         start_flag = false;
         return "done";
     });

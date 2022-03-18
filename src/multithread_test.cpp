@@ -29,11 +29,16 @@ const int times_to_ping = 10, fail_limit = 2;
 
 //for use of multi-thread socket test
 typedef std::lock_guard<std::mutex> guarded_mutex;
-std::atomic_int received_bytes = 0;
+std::mutex opened_socket_mutex;
+std::atomic_ullong received_bytes = 0;
 std::atomic_int launched = 0, still_running = 0;
 std::atomic_bool EXIT_FLAG = false;
 
-int terminateClient(int client);
+void push_socket(const SOCKET &s)
+{
+    guarded_mutex guard(opened_socket_mutex);
+    opened_socket.push(s);
+}
 
 static inline void draw_progress_dl(int progress, int this_bytes)
 {
@@ -89,6 +94,18 @@ static inline void draw_progress_gping(int progress, int *values)
     std::cerr<<" "<<progress + 1<<"/"<<times_to_ping<<" "<<values[progress]<<"ms";
 }
 
+static void SSL_Library_init()
+{
+    static bool init = false;
+    if(!init)
+        init = true;
+    else
+        return;
+    SSL_load_error_strings();
+    SSL_library_init();
+    OpenSSL_add_all_algorithms();
+}
+
 int _thread_download(std::string host, int port, std::string uri, std::string localaddr, int localport, std::string username, std::string password, bool useTLS = false)
 {
     launched++;
@@ -99,12 +116,13 @@ int _thread_download(std::string host, int port, std::string uri, std::string lo
     SOCKET sHost;
     std::string request = "GET " + uri + " HTTP/1.1\r\n"
                           "Host: " + host + "\r\n"
+                          "Connection: close\r\n"
                           "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/72.0.3626.121 Safari/537.36\r\n\r\n";
 
     sHost = initSocket(getNetworkType(localaddr), SOCK_STREAM, IPPROTO_TCP);
     if(INVALID_SOCKET == sHost)
         return -1;
-    opened_socket.push(sHost);
+    push_socket(sHost);
     //defer(closesocket(sHost);) // close socket in main thread
     setTimeout(sHost, 5000);
     if(startConnect(sHost, localaddr, localport) == SOCKET_ERROR || connectSocks5(sHost, username, password) == -1 || connectThruSocks(sHost, host, port) == -1)
@@ -141,7 +159,7 @@ int _thread_download(std::string host, int port, std::string uri, std::string lo
                 cur_len = SSL_read(ssl, bufRecv, BUF_SIZE - 1);
                 if(cur_len < 0)
                 {
-                    if(errno == EINTR || errno == EWOULDBLOCK || errno == EAGAIN)
+                    if(errno == EWOULDBLOCK || errno == EAGAIN)
                     {
                         continue;
                     }
@@ -195,6 +213,7 @@ int _thread_upload(std::string host, int port, std::string uri, std::string loca
     int retVal, cur_len;
     SOCKET sHost;
     std::string request = "POST " + uri + " HTTP/1.1\r\n"
+                          "Connection: close\r\n"
                           "Content-Length: 134217728\r\n"
                           "Host: " + host + "\r\n\r\n";
     std::string post_data;
@@ -202,7 +221,7 @@ int _thread_upload(std::string host, int port, std::string uri, std::string loca
     sHost = initSocket(getNetworkType(localaddr), SOCK_STREAM, IPPROTO_TCP);
     if(INVALID_SOCKET == sHost)
         return -1;
-    opened_socket.push(sHost);
+    push_socket(sHost);
     //defer(closesocket(sHost);) // close socket on main thread
     setTimeout(sHost, 5000);
     if(startConnect(sHost, localaddr, localport) == SOCKET_ERROR || connectSocks5(sHost, username, password) == -1 || connectThruSocks(sHost, host, port) == -1)
@@ -315,14 +334,11 @@ int perform_test(nodeInfo &node, std::string localaddr, int localport, std::stri
     urlParse(testfile, host, uri, port, useTLS);
     received_bytes = 0;
     EXIT_FLAG = false;
-    eraseElements(opened_socket);
 
     if(useTLS)
     {
         writeLog(LOG_TYPE_FILEDL, "Found HTTPS URL. Initializing OpenSSL library.");
-        SSL_load_error_strings();
-        SSL_library_init();
-        OpenSSL_add_all_algorithms();
+        SSL_Library_init();
     }
     else
     {
@@ -345,7 +361,7 @@ int perform_test(nodeInfo &node, std::string localaddr, int localport, std::stri
 
     writeLog(LOG_TYPE_FILEDL, "All threads launched. Start accumulating data.");
     auto start = steady_clock::now();
-    int transferred_bytes = 0, last_bytes = 0, this_bytes = 0, cur_recv_bytes = 0, max_speed = 0;
+    unsigned long long transferred_bytes = 0, last_bytes = 0, this_bytes = 0, cur_recv_bytes = 0, max_speed = 0;
     for(i = 1; i < 21; i++)
     {
         sleep(500); //accumulate data
@@ -374,6 +390,7 @@ int perform_test(nodeInfo &node, std::string localaddr, int localport, std::stri
     EXIT_FLAG = true; //terminate all threads right now
     while(!opened_socket.empty()) //close all sockets
     {
+        shutdown(opened_socket.front(), SD_BOTH);
         closesocket(opened_socket.front());
         opened_socket.pop();
     }
@@ -404,6 +421,7 @@ int perform_test(nodeInfo &node, std::string localaddr, int localport, std::stri
         pthread_kill(threads[i], SIGUSR1);
 #endif
         */
+        pthread_cancel(threads[i]);
         pthread_join(threads[i], NULL);
         writeLog(LOG_TYPE_FILEDL, "Thread #" + std::to_string(i + 1) + " has exited.");
     }
@@ -423,14 +441,11 @@ int upload_test(nodeInfo &node, std::string localaddr, int localport, std::strin
     urlParse(testfile, host, uri, port, useTLS);
     received_bytes = 0;
     EXIT_FLAG = false;
-    eraseElements(opened_socket);
 
     if(useTLS)
     {
         writeLog(LOG_TYPE_FILEUL, "Found HTTPS URL. Initializing OpenSSL library.");
-        SSL_load_error_strings();
-        SSL_library_init();
-        OpenSSL_add_all_algorithms();
+        SSL_Library_init();
     }
     else
     {
@@ -452,7 +467,7 @@ int upload_test(nodeInfo &node, std::string localaddr, int localport, std::strin
 
     writeLog(LOG_TYPE_FILEUL, "Worker threads launched. Start accumulating data.");
     auto start = steady_clock::now();
-    int transferred_bytes = 0, this_bytes = 0, cur_sent_bytes = 0;
+    unsigned long long transferred_bytes = 0, this_bytes = 0, cur_sent_bytes = 0;
     for(i = 1; i < 11; i++)
     {
         sleep(1000); //accumulate data
@@ -472,6 +487,7 @@ int upload_test(nodeInfo &node, std::string localaddr, int localport, std::strin
     EXIT_FLAG = true; //terminate worker thread right now
     while(!opened_socket.empty()) //close all sockets
     {
+        shutdown(opened_socket.front(), SD_BOTH);
         closesocket(opened_socket.front());
         opened_socket.pop();
     }
@@ -501,7 +517,9 @@ int upload_test(nodeInfo &node, std::string localaddr, int localport, std::strin
         pthread_kill(workers[i], SIGUSR1);
 #endif // _WIN32
         */
+        pthread_cancel(workers[i]);
         pthread_join(workers[i], NULL);
+        writeLog(LOG_TYPE_FILEUL, "Thread #" + std::to_string(i + 1) + " has exited.");
     }
     writeLog(LOG_TYPE_FILEUL, "Upload test completed.");
     return 0;

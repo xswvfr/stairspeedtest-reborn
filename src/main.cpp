@@ -37,6 +37,7 @@ using namespace std::chrono;
 //use for command argument
 bool rpcmode = false;
 std::string sub_url;
+bool pause_on_done = true;
 
 //for use globally
 bool multilink = false;
@@ -83,10 +84,10 @@ bool serve_cache_on_fetch_fail = false, print_debug_info = false;
 
 //declarations
 
-int explodeLog(std::string log, std::vector<nodeInfo> &nodes);
+int explodeLog(const std::string &log, std::vector<nodeInfo> &nodes);
 int tcping(nodeInfo &node);
-void getTestFile(nodeInfo &node, std::string proxy, std::vector<downloadLink> &downloadFiles, std::vector<linkMatchRule> &matchRules, std::string defaultTestFile);
-void ssrspeed_webserver_routine(std::string listen_address, int listen_port);
+void getTestFile(nodeInfo &node, const std::string &proxy, const std::vector<downloadLink> &downloadFiles, const std::vector<linkMatchRule> &matchRules, const std::string &defaultTestFile);
+void ssrspeed_webserver_routine(const std::string &listen_address, int listen_port);
 std::string get_nat_type_thru_socks5(const std::string &server, uint16_t port, const std::string &username = "", const std::string &password = "", const std::string &stun_server = "stun.ekiga.net", uint16_t stun_port = 3478);
 
 //original codes
@@ -159,10 +160,10 @@ void copyNodesWithGroupID(std::vector<nodeInfo> &source, std::vector<nodeInfo> &
 void clientCheck()
 {
 #ifdef _WIN32
-    std::string v2core_path = "tools\\clients\\v2ray-core\\v2-core.exe";
-    std::string ssr_libev_path = "tools\\clients\\shadowsocksr-libev\\ssr-libev.exe";
-    std::string ss_libev_path = "tools\\clients\\shadowsocks-libev\\ss-libev.exe";
-    std::string trojan_path = "tools\\clients\\trojan\\trojan-core.exe";
+    std::string v2core_path = "tools\\clients\\v2ray.exe";
+    std::string ssr_libev_path = "tools\\clients\\ssr-local.exe";
+    std::string ss_libev_path = "tools\\clients\\ss-local.exe";
+    std::string trojan_path = "tools\\clients\\trojan.exe";
 #else
     std::string v2core_path = "tools/clients/v2ray";
     std::string ssr_libev_path = "tools/clients/ssr-local";
@@ -215,18 +216,18 @@ void clientCheck()
 int runClient(int client)
 {
 #ifdef _WIN32
-    std::string v2core_path = "tools\\clients\\v2ray-core\\v2-core.exe -config config.json";
-    std::string ssr_libev_path = "tools\\clients\\shadowsocksr-libev\\ssr-libev.exe -u -c config.json";
+    std::string v2core_path = "tools\\clients\\v2ray.exe -config config.json";
+    std::string ssr_libev_path = "tools\\clients\\ssr-local.exe -u -c config.json";
 
-    std::string ss_libev_dir = "tools\\clients\\shadowsocks-libev\\";
-    std::string ss_libev_path = ss_libev_dir + "ss-libev.exe -u -c ..\\..\\..\\config.json";
+    std::string ss_libev_dir = "tools\\clients\\";
+    std::string ss_libev_path = ss_libev_dir + "ss-local.exe -u -c ..\\..\\config.json";
 
-    std::string ssr_win_dir = "tools\\clients\\shadowsocksr-win\\";
+    std::string ssr_win_dir = "tools\\clients\\";
     std::string ssr_win_path = ssr_win_dir + "shadowsocksr-win.exe";
-    std::string ss_win_dir = "tools\\clients\\shadowsocks-win\\";
+    std::string ss_win_dir = "tools\\clients\\";
     std::string ss_win_path = ss_win_dir + "shadowsocks-win.exe";
 
-    std::string trojan_path = "tools\\clients\\trojan\\trojan-core.exe -c config.json";
+    std::string trojan_path = "tools\\clients\\trojan.exe -c config.json";
 
     switch(client)
     {
@@ -299,11 +300,12 @@ int runClient(int client)
 int killClient(int client)
 {
 #ifdef _WIN32
-    std::string v2core_name = "v2-core.exe";
-    std::string ss_libev_name = "ss-libev.exe";
-    std::string ssr_libev_name = "ssr-libev.exe";
+    std::string v2core_name = "v2ray.exe";
+    std::string ss_libev_name = "ss-local.exe";
+    std::string ssr_libev_name = "ssr-local.exe";
     std::string ss_win_name = "shadowsocks-win.exe";
     std::string ssr_win_name = "shadowsocksr-win.exe";
+    std::string trojan_name = "trojan.exe";
 
     switch(client)
     {
@@ -334,6 +336,10 @@ int killClient(int client)
             writeLog(LOG_TYPE_INFO, "Killing shadowsocks-win...");
             killProgram(ss_win_name);
         }
+        break;
+    case SPEEDTEST_MESSAGE_FOUNDTROJAN:
+        writeLog(LOG_TYPE_INFO, "Killing trojan...");
+        killProgram(trojan_name);
         break;
     }
 #else
@@ -385,7 +391,7 @@ void readConf(std::string path)
     std::string strTemp;
 
     //ini.do_utf8_to_gbk = true;
-    ini.ParseFile("pref.ini");
+    ini.ParseFile(path);
 
     ini.EnterSection("common");
     if(ini.ItemPrefixExist("exclude_remark"))
@@ -414,6 +420,7 @@ void readConf(std::string path)
 #endif // _WIN32
     ini.GetIfExist("override_conf_port", override_conf_port);
     ini.GetIntIfExist("thread_count", def_thread_count);
+    ini.GetBoolIfExist("pause_on_done", pause_on_done);
 
     ini.EnterSection("export");
     ini.GetBoolIfExist("export_with_maxspeed", export_with_maxspeed);
@@ -564,9 +571,9 @@ void saveResult(std::vector<nodeInfo> &nodes)
         ini.Set("AvgSpeed", x.avgSpeed);
         ini.Set("MaxSpeed", x.maxSpeed);
         ini.Set("ULSpeed", x.ulSpeed);
-        ini.SetLong("UsedTraffic", x.totalRecvBytes);
-        ini.SetLong("GroupID", x.groupID);
-        ini.SetLong("ID", x.id);
+        ini.SetNumber<unsigned long long>("UsedTraffic", x.totalRecvBytes);
+        ini.SetNumber<int>("GroupID", x.groupID);
+        ini.SetNumber<int>("ID", x.id);
         ini.SetBool("Online", x.online);
         ini.SetArray("RawPing", ",", x.rawPing);
         ini.SetArray("RawSitePing", ",", x.rawSitePing);
@@ -576,8 +583,25 @@ void saveResult(std::vector<nodeInfo> &nodes)
     ini.ToFile(resultPath);
 }
 
+std::string removeEmoji(const std::string &orig_remark)
+{
+    char emoji_id[2] = {(char)-16, (char)-97};
+    std::string remark = orig_remark;
+    while(true)
+    {
+        if(remark[0] == emoji_id[0] && remark[1] == emoji_id[1])
+            remark.erase(0, 4);
+        else
+            break;
+    }
+    if(remark.empty())
+        return orig_remark;
+    return remark;
+}
+
 int singleTest(nodeInfo &node)
 {
+    node.remarks = trim(removeEmoji(node.remarks)); //remove all emojis
     int retVal = 0;
     std::string logdata, testserver, username, password, proxy;
     int testport;
@@ -623,10 +647,9 @@ int singleTest(nodeInfo &node)
     defer(killByHandle();)
     proxy = buildSocks5ProxyString(testserver, testport, username, password);
 
-    //printMsg(SPEEDTEST_MESSAGE_GOTSERVER, node, rpcmode);
     if(!rpcmode)
         printMsg(SPEEDTEST_MESSAGE_GOTSERVER, rpcmode, id, node.group, node.remarks, std::to_string(node_count));
-    sleep(200); /// wait for client startup
+    sleep(1000); /// wait for client startup
     writeLog(LOG_TYPE_INFO, "Now started fetching GeoIP info...");
     printMsg(SPEEDTEST_MESSAGE_STARTGEOIP, rpcmode, id);
     node.inboundGeoIP.set(std::async(std::launch::async, [node](){ return getGeoIPInfo(node.server, ""); }));
@@ -766,7 +789,7 @@ void batchTest(std::vector<nodeInfo> &nodes)
         writeLog(LOG_TYPE_INFO, "All nodes tested. Total/Online nodes: " + std::to_string(node_count) + "/" + std::to_string(onlines) + " Traffic used: " + speedCalc(tottraffic * 1.0));
         //exportHTML();
         saveResult(nodes);
-        if(!multilink || (multilink && multilink_export_as_one_image))
+        if(webserver_mode || !multilink)
         {
             printMsg(SPEEDTEST_MESSAGE_PICSAVING, rpcmode);
             writeLog(LOG_TYPE_INFO, "Now exporting result...");
@@ -795,19 +818,6 @@ void rewriteNodeID(std::vector<nodeInfo> &nodes)
 void rewriteNodeGroupID(std::vector<nodeInfo> &nodes, int groupID)
 {
     std::for_each(nodes.begin(), nodes.end(), [&](nodeInfo &x){ x.groupID = groupID; });
-}
-
-std::string removeEmoji(std::string remark)
-{
-    char emoji_id[2] = {(char)-16, (char)-97};
-    while(true)
-    {
-        if(remark[0] == emoji_id[0] && remark[1] == emoji_id[1])
-            remark.erase(0, 4);
-        else
-            break;
-    }
-    return remark;
 }
 
 void addNodes(std::string link, bool multilink)
@@ -958,47 +968,32 @@ void addNodes(std::string link, bool multilink)
 
 void setcd(std::string &file)
 {
-    char szTemp[1024] = {}, filename[256] = {};
+    char filename[256] = {};
     std::string path;
 #ifdef _WIN32
+    char szTemp[1024] = {};
     char *pname = NULL;
     DWORD retVal = GetFullPathName(file.data(), 1023, szTemp, &pname);
     if(!retVal)
         return;
     strcpy(filename, pname);
     strrchr(szTemp, '\\')[1] = '\0';
+    path.assign(szTemp);
 #else
-    char *ret = realpath(file.data(), szTemp);
+    char *ret = realpath(file.data(), NULL);
     if(ret == NULL)
         return;
-    ret = strcpy(filename, strrchr(szTemp, '/') + 1);
-    if(ret == NULL)
-        return;
-    strrchr(szTemp, '/')[1] = '\0';
+    strncpy(filename, strrchr(ret, '/') + 1, 255);
+    strrchr(ret, '/')[1] = '\0';
+    path.assign(ret);
+    free(ret);
 #endif // _WIN32
     file.assign(filename);
-    path.assign(szTemp);
     chdir(path.data());
 }
 
 int main(int argc, char* argv[])
 {
-    /*
-    //do some trick to allow child processes die on termination
-    #ifndef _WIN32
-    setsid();
-    unshare(CLONE_NEWPID | CLONE_NEWUSER);
-    fileWrite("/proc/self/uid_map", "0 " + std::to_string(getuid()) + " 1", false);
-    int retVal = fork();
-    if(retVal == -1)
-    {
-        cerr << "error on fork" << endl;
-        return 1;
-    }
-    else if(retVal != 0)
-        return 0;
-    #endif // _WIN32
-    */
     std::vector<nodeInfo> nodes;
     nodeInfo node;
     std::string link;
@@ -1027,7 +1022,6 @@ int main(int argc, char* argv[])
     //along with some console window info
     SetConsoleOutputCP(65001);
 #else
-    signal(SIGUSR1, SIG_IGN);
     signal(SIGCHLD, SIG_IGN);
     signal(SIGPIPE, SIG_IGN);
     signal(SIGABRT, SIG_IGN);
@@ -1104,8 +1098,6 @@ int main(int argc, char* argv[])
         addNodes(link, multilink);
     }
     rewriteNodeID(allNodes); //reset all index
-    for(nodeInfo &x : allNodes)
-        x.remarks = trim(removeEmoji(x.remarks)); //remove all emojis
     node_count = allNodes.size();
     if(allNodes.size() > 1) //group or multi-link
     {
@@ -1177,7 +1169,7 @@ int main(int argc, char* argv[])
     sleep(1);
     //std::cin.clear();
     //std::cin.ignore();
-    if(!rpcmode)
+    if(!rpcmode && sub_url.size() && pause_on_done)
         _getch();
 #ifdef _WIN32
     //stop socket library before exit
